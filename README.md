@@ -1,2 +1,2 @@
-# agent
+# mini-agent
 agent-learn
