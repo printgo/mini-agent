@@ -2,7 +2,21 @@ import os
 import sqlite3
 
 
-DB_PATH = "data/memory.db"
+BASE_DIR = os.path.dirname(
+    os.path.dirname(
+        os.path.abspath(__file__)
+    )
+)
+
+DATA_DIR = os.path.join(
+    BASE_DIR,
+    "data"
+)
+
+DB_PATH = os.path.join(
+    DATA_DIR,
+    "memory.db"
+)
 
 
 class Memory:
@@ -10,7 +24,7 @@ class Memory:
     def __init__(self):
 
         os.makedirs(
-            "data",
+            DATA_DIR,
             exist_ok=True
         )
 
@@ -18,19 +32,34 @@ class Memory:
             DB_PATH
         )
 
-        self._create_table()
+        self._create_tables()
 
-    def _create_table(self):
+    def _create_tables(self):
 
         cursor = self.conn.cursor()
 
+        # 会话消息
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # 长期记忆
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                value TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -39,6 +68,7 @@ class Memory:
 
     def add_message(
         self,
+        session_id: str,
         role: str,
         content: str
     ):
@@ -48,12 +78,14 @@ class Memory:
         cursor.execute(
             """
             INSERT INTO messages (
+                session_id,
                 role,
                 content
             )
-            VALUES (?, ?)
+            VALUES (?, ?, ?)
             """,
             (
+                session_id,
                 role,
                 content
             )
@@ -61,7 +93,10 @@ class Memory:
 
         self.conn.commit()
 
-    def get_messages(self):
+    def get_messages(
+        self,
+        session_id: str
+    ):
 
         cursor = self.conn.cursor()
 
@@ -69,8 +104,10 @@ class Memory:
             """
             SELECT role, content
             FROM messages
+            WHERE session_id = ?
             ORDER BY id ASC
-            """
+            """,
+            (session_id,)
         )
 
         rows = cursor.fetchall()
@@ -83,12 +120,50 @@ class Memory:
             for role, content in rows
         ]
 
-    def clear(self):
+    def save_memory(
+        self,
+        key: str,
+        value: str
+    ):
 
         cursor = self.conn.cursor()
 
         cursor.execute(
-            "DELETE FROM messages"
+            """
+            INSERT INTO memories (
+                key,
+                value
+            )
+            VALUES (?, ?)
+
+            ON CONFLICT(key)
+            DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                key,
+                value
+            )
         )
 
         self.conn.commit()
+
+    def get_memories(self):
+
+        cursor = self.conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT key, value
+            FROM memories
+            ORDER BY id ASC
+            """
+        )
+
+        rows = cursor.fetchall()
+
+        return {
+            key: value
+            for key, value in rows
+        }

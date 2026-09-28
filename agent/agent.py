@@ -7,26 +7,47 @@ from memory.memory import Memory
 
 class MiniAgent:
 
-    def __init__(self):
+    def __init__(
+        self,
+        session_id: str
+    ):
+
+        self.session_id = session_id
 
         self.memory = Memory()
+
+        long_term_memory = (
+            self.memory.get_memories()
+        )
+
+        memory_text = "\n".join(
+            [
+                f"{key}: {value}"
+                for key, value
+                in long_term_memory.items()
+            ]
+        )
 
         self.messages = [
             {
                 "role": "system",
                 "content": (
-                    "你是一个AI Research Agent。"
-                    "你可以自主决定是否调用工具。"
-                    "对于最新信息、实时信息或外部信息，"
-                    "优先使用 search_web 搜索。"
-                    "当需要核实信息或深入理解网页内容时，"
-                    "使用 read_webpage。"
+                    "你是一个AI Research Agent。\n"
+                    "你可以自主决定是否调用工具。\n\n"
+
+                    "以下是关于用户的长期记忆：\n"
+                    f"{memory_text}\n\n"
+
+                    "这些长期记忆来自之前保存的信息，"
+                    "在回答与用户背景有关的问题时可以使用。"
                 )
             }
         ]
 
         # 从SQLite恢复历史聊天
-        history = self.memory.get_messages()
+        history = self.memory.get_messages(
+            self.session_id
+        )
 
         self.messages.extend(history)
 
@@ -38,6 +59,7 @@ class MiniAgent:
         })
 
         self.memory.add_message(
+            self.session_id,
             "user",
             user_input
         )
@@ -125,6 +147,7 @@ class MiniAgent:
             })
 
             self.memory.add_message(
+                self.session_id,
                 "assistant",
                 final_answer
             )
