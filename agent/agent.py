@@ -2,11 +2,14 @@ import json
 
 from llm.client import chat
 from tools.registry import execute_tool
+from memory.memory import Memory
 
 
 class MiniAgent:
 
     def __init__(self):
+
+        self.memory = Memory()
 
         self.messages = [
             {
@@ -16,16 +19,16 @@ class MiniAgent:
                     "你可以自主决定是否调用工具。"
                     "对于最新信息、实时信息或外部信息，"
                     "优先使用 search_web 搜索。"
-                    "搜索结果只是线索和摘要。"
-                    "当需要核实信息、深入理解内容或引用具体来源时，"
-                    "应使用 read_webpage 阅读重要网页的正文。"
-                    "优先选择官方网站、官方文档、论文、"
-                    "权威机构等高质量一手来源。"
-                    "如果工具失败，可以调整策略后重试，"
-                    "但不要无意义地重复相同调用。"
+                    "当需要核实信息或深入理解网页内容时，"
+                    "使用 read_webpage。"
                 )
             }
         ]
+
+        # 从SQLite恢复历史聊天
+        history = self.memory.get_messages()
+
+        self.messages.extend(history)
 
     def run(self, user_input: str) -> str:
 
@@ -33,6 +36,11 @@ class MiniAgent:
             "role": "user",
             "content": user_input
         })
+
+        self.memory.add_message(
+            "user",
+            user_input
+        )
 
         max_steps = 10
 
@@ -115,6 +123,11 @@ class MiniAgent:
                 "role": "assistant",
                 "content": final_answer
             })
+
+            self.memory.add_message(
+                "assistant",
+                final_answer
+            )
 
             return final_answer
 
