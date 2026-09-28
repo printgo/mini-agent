@@ -4,7 +4,7 @@ from agent.agent import MiniAgent
 def main():
 
     print("==============================")
-    print("      MiniAgent v6")
+    print("      MiniAgent v7")
     print("      Model: DeepSeek")
     print("==============================")
     print("输入 exit 退出程序")

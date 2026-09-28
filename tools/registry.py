@@ -1,19 +1,25 @@
 from tools.calculator import calculator, CALCULATOR_SCHEMA
 from tools.time_tool import get_current_time, TIME_SCHEMA
 from tools.search import search_web, SEARCH_SCHEMA
+from tools.web_reader import (
+    read_webpage,
+    WEB_READER_SCHEMA
+)
 
 
 TOOL_REGISTRY = {
     "calculator": calculator,
     "get_current_time": get_current_time,
-    "search_web": search_web
+    "search_web": search_web,
+    "read_webpage": read_webpage
 }
 
 
 TOOL_SCHEMAS = [
     CALCULATOR_SCHEMA,
     TIME_SCHEMA,
-    SEARCH_SCHEMA
+    SEARCH_SCHEMA,
+    WEB_READER_SCHEMA
 ]
 
 
