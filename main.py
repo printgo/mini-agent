@@ -10,7 +10,7 @@ def main():
     print("输入 exit 退出程序")
 
     agent = MiniAgent(
-        session_id="session_002"
+        session_id="session_001"
     )
 
     while True:

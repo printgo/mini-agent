@@ -1,9 +1,10 @@
 import json
 
 from llm.client import chat
-from tools.registry import execute_tool
-from memory.memory import Memory
 from memory.extractor import extract_memories
+from memory.memory import Memory
+from memory.updater import decide_memory_action
+from tools.registry import execute_tool
 
 
 class MiniAgent:
@@ -12,14 +13,10 @@ class MiniAgent:
         self,
         session_id: str
     ):
-
-        # 当前会话ID
         self.session_id = session_id
 
-        # Memory数据库
         self.memory = Memory()
 
-        # Agent固定规则
         self.system_prompt = (
             "你是一个AI Research Agent。"
             "你可以自主决定是否调用工具。"
@@ -29,44 +26,51 @@ class MiniAgent:
             "使用 read_webpage。"
         )
 
-        # 只恢复当前Session的聊天历史
-        self.messages = self.memory.get_messages(
-            self.session_id
+        # 这里只恢复当前 Session 的聊天历史。
+        # 长期记忆不直接塞入 self.messages，
+        # 而是在 build_context() 中动态注入。
+        self.messages = (
+            self.memory.get_messages(
+                self.session_id
+            )
         )
 
-    # ==================================
-    # 构建发送给LLM的Context
-    # ==================================
+    def build_context(self) -> list[dict]:
+        """
+        构建当前发送给 LLM 的上下文。
 
-    def build_context(self):
+        每次调用时动态读取长期记忆，
+        保证刚刚新增、更新或删除的 Memory
+        能立即生效。
+        """
 
-        # 每次调用LLM之前
-        # 动态读取最新的长期记忆
-        memories = self.memory.get_memories()
-
-        memory_text = "\n".join(
-            [
-                f"{key}: {value}"
-                for key, value
-                in memories.items()
-            ]
+        memories = (
+            self.memory.get_memories()
         )
 
-        if not memory_text:
-            memory_text = "暂无长期记忆"
+        if memories:
+            memory_text = "\n".join(
+                [
+                    f"{key}: {value}"
+                    for key, value
+                    in memories.items()
+                ]
+            )
 
-        system_content = (
-            self.system_prompt
-            + "\n\n"
-            + "以下是关于用户的长期记忆：\n"
-            + memory_text
-            + "\n\n"
-            + "你可以在回答与用户背景相关的问题时，"
-            + "使用这些长期记忆。"
-        )
+            system_content = (
+                f"{self.system_prompt}\n\n"
+                "以下是关于用户的长期记忆。"
+                "这些记忆只用于帮助你理解用户背景，"
+                "回答时只使用与当前问题有关的内容。\n\n"
+                f"{memory_text}"
+            )
 
-        # 临时构建Context
-        context = [
+        else:
+            system_content = (
+                self.system_prompt
+            )
+
+        return [
             {
                 "role": "system",
                 "content": system_content
@@ -74,50 +78,179 @@ class MiniAgent:
             *self.messages
         ]
 
-        return context
+    def _process_memories(
+        self,
+        user_input: str
+    ):
+        """
+        v8.4 Memory Update 流程：
 
-    # ==================================
-    # Agent运行入口
-    # ==================================
+        Extractor
+            ↓
+        Candidate Memory
+            ↓
+        查询旧 Memory
+            ↓
+        Updater
+            ↓
+        ADD / UPDATE / KEEP / DELETE
+        """
+
+        extracted_memories = (
+            extract_memories(
+                user_input
+            )
+        )
+
+        print(
+            "[Memory] 提取结果:",
+            extracted_memories
+        )
+
+        for item in extracted_memories:
+
+            category = item.get(
+                "category"
+            )
+
+            key = item.get(
+                "key"
+            )
+
+            new_value = item.get(
+                "value"
+            )
+
+            if not category:
+                continue
+
+            if not key:
+                continue
+
+            if not new_value:
+                continue
+
+            old_memory = (
+                self.memory.get_memory(
+                    category,
+                    key
+                )
+            )
+
+            if old_memory:
+                old_value = (
+                    old_memory[
+                        "value"
+                    ]
+                )
+            else:
+                old_value = None
+
+            decision = (
+                decide_memory_action(
+                    user_input=(
+                        user_input
+                    ),
+                    category=category,
+                    key=key,
+                    new_value=(
+                        new_value
+                    ),
+                    old_value=(
+                        old_value
+                    )
+                )
+            )
+
+            action = decision[
+                "action"
+            ]
+
+            final_value = decision[
+                "value"
+            ]
+
+            reason = decision.get(
+                "reason",
+                ""
+            )
+
+            print(
+                f"[Memory] "
+                f"{category}.{key}"
+            )
+
+            print(
+                f"[Memory] old = "
+                f"{old_value}"
+            )
+
+            print(
+                f"[Memory] new = "
+                f"{new_value}"
+            )
+
+            print(
+                f"[Memory] action = "
+                f"{action}"
+            )
+
+            print(
+                f"[Memory] reason = "
+                f"{reason}"
+            )
+
+            if action == "ADD":
+
+                self.memory.add_memory(
+                    category=category,
+                    key=key,
+                    value=final_value,
+                    source_session_id=(
+                        self.session_id
+                    )
+                )
+
+            elif action == "UPDATE":
+
+                self.memory.update_memory(
+                    category=category,
+                    key=key,
+                    value=final_value,
+                    source_session_id=(
+                        self.session_id
+                    )
+                )
+
+            elif action == "DELETE":
+
+                self.memory.delete_memory(
+                    category=category,
+                    key=key
+                )
+
+            elif action == "KEEP":
+                pass
 
     def run(
         self,
         user_input: str
     ) -> str:
+        """
+        执行一次 Agent 对话。
+        """
 
         # ==============================
-        # 1. 提取长期记忆
+        # 1. 提取并更新长期记忆
         # ==============================
 
-        extracted_memories = (
-            extract_memories(user_input)
+        self._process_memories(
+            user_input
         )
 
-        for item in extracted_memories:
-
-            key = item.get("key")
-            value = item.get("value")
-
-            if key and value:
-
-                self.memory.save_memory(
-                    key,
-                    value
-                )
-
-                print(
-                    f"[Memory] 保存长期记忆: "
-                    f"{key} = {value}"
-                )
-
         # ==============================
-        # 2. 保存用户消息到Session
+        # 2. 保存用户消息
         # ==============================
-
-        self.messages.append({
-            "role": "user",
-            "content": user_input
-        })
 
         self.memory.add_message(
             self.session_id,
@@ -125,132 +258,191 @@ class MiniAgent:
             user_input
         )
 
+        self.messages.append(
+            {
+                "role": "user",
+                "content": user_input
+            }
+        )
+
         # ==============================
         # 3. Agent Loop
         # ==============================
 
-        max_steps = 10
-
         for step in range(
             1,
-            max_steps + 1
+            11
         ):
 
             print(
-                f"\n[Agent] Step {step}"
+                f"\n[Agent] Step {step}\n"
             )
 
-            # 每一步都重新构建Context
-            context = self.build_context()
+            context = (
+                self.build_context()
+            )
 
             response = chat(
                 context
             )
 
-            # ==========================
-            # 需要调用工具
-            # ==========================
+            # --------------------------
+            # 将 assistant 消息放入上下文
+            # --------------------------
+
+            assistant_message = {
+                "role": "assistant",
+                "content": (
+                    response.content
+                    or ""
+                )
+            }
 
             if response.tool_calls:
 
-                self.messages.append(
-                    response
-                )
-
-                for tool_call in response.tool_calls:
-
-                    tool_name = (
-                        tool_call
-                        .function
-                        .name
-                    )
-
-                    try:
-
-                        arguments = json.loads(
-                            tool_call
-                            .function
-                            .arguments
-                        )
-
-                    except json.JSONDecodeError as e:
-
-                        arguments = {}
-
-                        result = {
-                            "success": False,
-                            "error": (
-                                "工具参数解析失败: "
-                                + str(e)
+                assistant_message[
+                    "tool_calls"
+                ] = [
+                    {
+                        "id": (
+                            tool_call.id
+                        ),
+                        "type": "function",
+                        "function": {
+                            "name": (
+                                tool_call
+                                .function
+                                .name
+                            ),
+                            "arguments": (
+                                tool_call
+                                .function
+                                .arguments
                             )
                         }
+                    }
+                    for tool_call
+                    in response.tool_calls
+                ]
 
-                    else:
+            self.messages.append(
+                assistant_message
+            )
 
-                        print(
-                            f"[Agent] 调用工具: "
-                            f"{tool_name}"
+            # --------------------------
+            # 没有工具调用：得到最终答案
+            # --------------------------
+
+            if not response.tool_calls:
+
+                answer = (
+                    response.content
+                    or ""
+                )
+
+                self.memory.add_message(
+                    self.session_id,
+                    "assistant",
+                    answer
+                )
+
+                return answer
+
+            # --------------------------
+            # 执行全部工具调用
+            # --------------------------
+
+            for tool_call in (
+                response.tool_calls
+            ):
+
+                tool_name = (
+                    tool_call
+                    .function
+                    .name
+                )
+
+                raw_arguments = (
+                    tool_call
+                    .function
+                    .arguments
+                )
+
+                print(
+                    f"[Tool] 调用: "
+                    f"{tool_name}"
+                )
+
+                print(
+                    f"[Tool] 参数: "
+                    f"{raw_arguments}"
+                )
+
+                try:
+                    arguments = (
+                        json.loads(
+                            raw_arguments
                         )
+                    )
 
-                        print(
-                            f"[Agent] 参数: "
-                            f"{arguments}"
+                except json.JSONDecodeError as e:
+
+                    result = {
+                        "success": False,
+                        "error": (
+                            "工具参数 JSON 解析失败: "
+                            f"{e}"
                         )
+                    }
 
-                        try:
+                else:
 
-                            result = execute_tool(
+                    try:
+                        result = (
+                            execute_tool(
                                 tool_name,
                                 arguments
                             )
+                        )
 
-                        except Exception as e:
+                    except Exception as e:
+                        result = {
+                            "success": False,
+                            "error": str(e)
+                        }
 
-                            result = {
-                                "success": False,
-                                "error": str(e)
-                            }
+                print(
+                    f"[Tool] 结果: "
+                    f"{result}"
+                )
 
-                    print(
-                        f"[Tool] 返回结果: "
-                        f"{result}"
-                    )
-
-                    # Tool Calling协议要求：
-                    # 每个tool_call_id
-                    # 必须对应一个tool消息
-                    self.messages.append({
+                # 每一个 tool_call 都必须紧跟
+                # 一个相同 tool_call_id 的 tool 消息。
+                self.messages.append(
+                    {
                         "role": "tool",
                         "tool_call_id": (
                             tool_call.id
                         ),
-                        "content": str(result)
-                    })
+                        "content": str(
+                            result
+                        )
+                    }
+                )
 
-                continue
+        # ==============================
+        # 4. 超过最大步数
+        # ==============================
 
-            # ==========================
-            # 最终答案
-            # ==========================
-
-            final_answer = (
-                response.content
-            )
-
-            self.messages.append({
-                "role": "assistant",
-                "content": final_answer
-            })
-
-            self.memory.add_message(
-                self.session_id,
-                "assistant",
-                final_answer
-            )
-
-            return final_answer
-
-        raise RuntimeError(
-            f"Agent超过最大执行步数: "
-            f"{max_steps}"
+        answer = (
+            "Agent 已达到最大执行步数，"
+            "本轮任务停止。"
         )
+
+        self.memory.add_message(
+            self.session_id,
+            "assistant",
+            answer
+        )
+
+        return answer
