@@ -3,6 +3,7 @@ import json
 from llm.client import chat
 from memory.extractor import extract_memories
 from memory.memory import Memory
+from memory.retriever import retrieve_memories
 from memory.updater import decide_memory_action
 from tools.registry import execute_tool
 
@@ -26,49 +27,85 @@ class MiniAgent:
             "使用 read_webpage。"
         )
 
-        # 这里只恢复当前 Session 的聊天历史。
-        # 长期记忆不直接塞入 self.messages，
-        # 而是在 build_context() 中动态注入。
+        # 只恢复当前 Session 历史。
+        #
+        # 长期记忆不会直接放进 self.messages，
+        # 而是在 build_context() 中根据当前问题
+        # 动态检索。
         self.messages = (
             self.memory.get_messages(
                 self.session_id
             )
         )
 
-    def build_context(self) -> list[dict]:
+    def build_context(
+        self,
+        user_input: str
+    ) -> list[dict]:
         """
         构建当前发送给 LLM 的上下文。
 
-        每次调用时动态读取长期记忆，
-        保证刚刚新增、更新或删除的 Memory
-        能立即生效。
+        v8.5：
+        不再把所有长期记忆全部注入 Prompt，
+        而是根据当前 user_input 检索相关记忆。
         """
 
-        memories = (
+        # ==============================
+        # 1. 获取全部长期记忆
+        # ==============================
+
+        all_memories = (
             self.memory.get_memories()
         )
 
-        if memories:
+        # ==============================
+        # 2. Memory Retrieval
+        # ==============================
+
+        relevant_memories = (
+            retrieve_memories(
+                user_input=user_input,
+                memories=all_memories
+            )
+        )
+
+        print(
+            "[Memory Retrieval] 命中:",
+            relevant_memories
+        )
+
+        # ==============================
+        # 3. 构建 System Prompt
+        # ==============================
+
+        if relevant_memories:
+
             memory_text = "\n".join(
                 [
                     f"{key}: {value}"
                     for key, value
-                    in memories.items()
+                    in relevant_memories.items()
                 ]
             )
 
             system_content = (
                 f"{self.system_prompt}\n\n"
-                "以下是关于用户的长期记忆。"
+                "以下是与当前问题相关的用户长期记忆。"
                 "这些记忆只用于帮助你理解用户背景，"
-                "回答时只使用与当前问题有关的内容。\n\n"
+                "不要机械复述全部记忆，"
+                "只在与当前问题有关时自然使用。\n\n"
                 f"{memory_text}"
             )
 
         else:
+
             system_content = (
                 self.system_prompt
             )
+
+        # ==============================
+        # 4. 返回完整上下文
+        # ==============================
 
         return [
             {
@@ -78,12 +115,50 @@ class MiniAgent:
             *self.messages
         ]
 
+    def _contains_memory_change_signal(
+        self,
+        user_input: str
+    ) -> bool:
+        """
+        判断当前输入是否包含明显的：
+
+        修改
+        否定
+        删除
+
+        Memory 的信号。
+        """
+
+        change_signals = [
+            "不再",
+            "不是",
+            "不要",
+            "忘记",
+            "删除",
+            "取消",
+            "停止",
+            "不做",
+            "不学",
+            "改成",
+            "改为",
+            "换成",
+            "更换",
+            "以后叫我",
+            "现在叫我",
+            "以后不要",
+        ]
+
+        return any(
+            signal in user_input
+            for signal in change_signals
+        )
+
     def _process_memories(
         self,
         user_input: str
     ):
         """
-        v8.4 Memory Update 流程：
+        Memory Update 流程：
 
         Extractor
             ↓
@@ -91,10 +166,16 @@ class MiniAgent:
             ↓
         查询旧 Memory
             ↓
-        Updater
+        相同值快速 KEEP
+            ↓
+        Memory Updater
             ↓
         ADD / UPDATE / KEEP / DELETE
         """
+
+        # ==============================
+        # 1. Memory Extractor
+        # ==============================
 
         extracted_memories = (
             extract_memories(
@@ -106,6 +187,10 @@ class MiniAgent:
             "[Memory] 提取结果:",
             extracted_memories
         )
+
+        # ==============================
+        # 2. 逐条处理候选 Memory
+        # ==============================
 
         for item in extracted_memories:
 
@@ -130,6 +215,10 @@ class MiniAgent:
             if not new_value:
                 continue
 
+            # ==========================
+            # 3. 查询旧 Memory
+            # ==========================
+
             old_memory = (
                 self.memory.get_memory(
                     category,
@@ -138,13 +227,71 @@ class MiniAgent:
             )
 
             if old_memory:
+
                 old_value = (
                     old_memory[
                         "value"
                     ]
                 )
+
             else:
+
                 old_value = None
+
+            # ==========================
+            # 4. v8.4.1 优化
+            #
+            # 新旧值完全相同的时候，
+            # 一般不需要再次调用 DeepSeek。
+            # ==========================
+
+            same_value = (
+                old_value is not None
+                and str(old_value).strip()
+                == str(new_value).strip()
+            )
+
+            has_change_signal = (
+                self._contains_memory_change_signal(
+                    user_input
+                )
+            )
+
+            if (
+                same_value
+                and not has_change_signal
+            ):
+
+                print(
+                    f"[Memory] "
+                    f"{category}.{key}"
+                )
+
+                print(
+                    f"[Memory] old = "
+                    f"{old_value}"
+                )
+
+                print(
+                    f"[Memory] new = "
+                    f"{new_value}"
+                )
+
+                print(
+                    "[Memory] action = KEEP"
+                )
+
+                print(
+                    "[Memory] reason = "
+                    "新旧值一致，直接 KEEP，"
+                    "跳过 Memory Updater 调用"
+                )
+
+                continue
+
+            # ==========================
+            # 5. Memory Updater
+            # ==========================
 
             decision = (
                 decide_memory_action(
@@ -200,6 +347,10 @@ class MiniAgent:
                 f"{reason}"
             )
 
+            # ==========================
+            # 6. 执行数据库操作
+            # ==========================
+
             if action == "ADD":
 
                 self.memory.add_memory(
@@ -230,6 +381,7 @@ class MiniAgent:
                 )
 
             elif action == "KEEP":
+
                 pass
 
     def run(
@@ -278,17 +430,29 @@ class MiniAgent:
                 f"\n[Agent] Step {step}\n"
             )
 
+            # ==========================
+            # v8.5
+            #
+            # build_context 现在需要
+            # 当前 user_input。
+            #
+            # Memory Retriever 会根据它
+            # 选择相关长期记忆。
+            # ==========================
+
             context = (
-                self.build_context()
+                self.build_context(
+                    user_input
+                )
             )
 
             response = chat(
                 context
             )
 
-            # --------------------------
-            # 将 assistant 消息放入上下文
-            # --------------------------
+            # ==========================
+            # 4. Assistant Message
+            # ==========================
 
             assistant_message = {
                 "role": "assistant",
@@ -329,9 +493,9 @@ class MiniAgent:
                 assistant_message
             )
 
-            # --------------------------
-            # 没有工具调用：得到最终答案
-            # --------------------------
+            # ==========================
+            # 5. 没有 Tool Call
+            # ==========================
 
             if not response.tool_calls:
 
@@ -348,9 +512,9 @@ class MiniAgent:
 
                 return answer
 
-            # --------------------------
-            # 执行全部工具调用
-            # --------------------------
+            # ==========================
+            # 6. 执行 Tool Calls
+            # ==========================
 
             for tool_call in (
                 response.tool_calls
@@ -379,6 +543,7 @@ class MiniAgent:
                 )
 
                 try:
+
                     arguments = (
                         json.loads(
                             raw_arguments
@@ -398,6 +563,7 @@ class MiniAgent:
                 else:
 
                     try:
+
                         result = (
                             execute_tool(
                                 tool_name,
@@ -406,6 +572,7 @@ class MiniAgent:
                         )
 
                     except Exception as e:
+
                         result = {
                             "success": False,
                             "error": str(e)
@@ -416,8 +583,8 @@ class MiniAgent:
                     f"{result}"
                 )
 
-                # 每一个 tool_call 都必须紧跟
-                # 一个相同 tool_call_id 的 tool 消息。
+                # 一个 tool_call
+                # 必须对应一个 tool message。
                 self.messages.append(
                     {
                         "role": "tool",
@@ -431,7 +598,7 @@ class MiniAgent:
                 )
 
         # ==============================
-        # 4. 超过最大步数
+        # 7. 最大执行步数
         # ==============================
 
         answer = (
