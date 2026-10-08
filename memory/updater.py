@@ -1,7 +1,6 @@
 import json
 
-from llm.client import client
-
+from llm.client import MEMORY_MODEL, complete
 
 ALLOWED_ACTIONS = {
     "ADD",
@@ -77,8 +76,8 @@ def decide_memory_action(
         }
     ]
 
-    response = client.chat.completions.create(
-        model="deepseek-chat",
+    response = complete(
+        model=MEMORY_MODEL,
         messages=messages
     )
 

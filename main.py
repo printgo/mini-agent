@@ -1,13 +1,20 @@
 from agent.agent import MiniAgent
+from llm.client import MODEL
+import logging
 
 
 def main():
 
     print("==============================")
-    print("      MiniAgent v8")
-    print("      Model: DeepSeek")
+    print("      MiniAgent v8.6")
+    print(f"      Model: {MODEL}")
     print("==============================")
     print("输入 exit 退出程序")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
 
     agent = MiniAgent(
         session_id="session_001"

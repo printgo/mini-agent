@@ -1,7 +1,6 @@
 import json
 
-from llm.client import client
-
+from llm.client import MEMORY_MODEL, complete
 
 ALLOWED_MEMORY_KEYS = {
     ("profile", "name"),
@@ -198,8 +197,8 @@ def extract_memories(
     ]
 
     try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",
+        response = complete(
+            model=MEMORY_MODEL,
             messages=messages
         )
     except Exception as e:
