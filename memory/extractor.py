@@ -1,6 +1,9 @@
 import json
+import logging
 
 from llm.client import MEMORY_MODEL, complete
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_MEMORY_KEYS = {
     ("profile", "name"),
@@ -144,167 +147,71 @@ Question != Memory
 
 
 def _strip_code_fence(content: str) -> str:
-    """
-    防止模型偶尔返回：
-
-    ```json
-    [...]
-    ```
-    """
-
+    """兼容模型偶尔返回的 Markdown 代码块。"""
     content = content.strip()
 
     if not content.startswith("```"):
         return content
 
-    lines = content.splitlines()
-
-    if lines:
-        lines = lines[1:]
-
+    lines = content.splitlines()[1:]
     if lines and lines[-1].strip() == "```":
         lines = lines[:-1]
 
     return "\n".join(lines).strip()
 
 
-def extract_memories(
-    user_input: str
-) -> list[dict]:
-    """
-    从用户输入中提取长期记忆候选。
-
-    返回格式：
-
-    [
-        {
-            "category": "career",
-            "key": "direction",
-            "value": "Java后端开发"
-        }
-    ]
-    """
-
+def extract_memories(user_input: str) -> list[dict]:
+    """只返回白名单中的有效字符串记忆；失败时返回空列表。"""
     messages = [
-        {
-            "role": "system",
-            "content": SYSTEM_PROMPT
-        },
-        {
-            "role": "user",
-            "content": user_input
-        }
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_input},
     ]
 
     try:
         response = complete(
             model=MEMORY_MODEL,
-            messages=messages
+            messages=messages,
         )
-    except Exception as e:
-        print(
-            "[Memory Extractor] 调用失败:",
-            e
-        )
-        return []
 
-    content = (
-        response
-        .choices[0]
-        .message
-        .content
-        or ""
-    )
+        content = response.choices[0].message.content
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("记忆提取内容为空")
 
-    content = _strip_code_fence(
-        content
-    )
+        result = json.loads(_strip_code_fence(content))
+        if not isinstance(result, list):
+            raise ValueError("记忆提取结果必须是 JSON 数组")
 
-    try:
-        result = json.loads(
-            content
-        )
-    except json.JSONDecodeError:
-        print(
-            "[Memory Extractor] JSON 解析失败:",
-            content
-        )
-        return []
-
-    if not isinstance(
-        result,
-        list
-    ):
+    except Exception:
+        logger.exception("Memory Extractor 失败，跳过本轮记忆提取")
         return []
 
     memories = []
 
     for item in result:
+        if not isinstance(item, dict):
+            continue
 
-        if not isinstance(
-            item,
-            dict
+        category = item.get("category")
+        key = item.get("key")
+        value = item.get("value")
+
+        if not all(
+            isinstance(field, str)
+            for field in (category, key, value)
         ):
             continue
 
-        category = item.get(
-            "category"
-        )
+        category = category.strip().lower()
+        key = key.strip().lower()
+        value = value.strip()
 
-        key = item.get(
-            "key"
-        )
-
-        value = item.get(
-            "value"
-        )
-
-        if not isinstance(
-            category,
-            str
-        ):
+        if not value or (category, key) not in ALLOWED_MEMORY_KEYS:
             continue
 
-        if not isinstance(
-            key,
-            str
-        ):
-            continue
-
-        if value is None:
-            continue
-
-        category = (
-            category
-            .strip()
-            .lower()
-        )
-
-        key = (
-            key
-            .strip()
-            .lower()
-        )
-
-        value = str(
-            value
-        ).strip()
-
-        if not value:
-            continue
-
-        if (
-            category,
-            key
-        ) not in ALLOWED_MEMORY_KEYS:
-            continue
-
-        memories.append(
-            {
-                "category": category,
-                "key": key,
-                "value": value
-            }
-        )
+        memories.append({
+            "category": category,
+            "key": key,
+            "value": value,
+        })
 
     return memories
