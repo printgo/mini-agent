@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 class ResearchAgent:
     """固定阶段的研究流程：计划、审批、检索、证据、报告。"""
 
+    report_scope = (
+        "本报告基于搜索摘要，尚未核验网页全文和结论的语义支持。"
+    )
+
     def __init__(self, store: EvidenceStore):
         self.store = store
 
@@ -207,7 +211,7 @@ class ResearchAgent:
             ):
                 raise ValueError("报告标题和正文不能为空")
 
-            if re.search(r"\[E\d+\]", heading + text):
+            if re.search(r"\[(?:E\d+|D\d+C\d+)\]", heading + text):
                 raise ValueError("正文引用必须由程序生成")
 
             if (
@@ -231,7 +235,7 @@ class ResearchAgent:
 
         lines.extend([
             "## 局限",
-            "- 本报告基于搜索摘要，尚未核验网页全文和结论的语义支持。",
+            f"- {self.report_scope}",
         ])
         lines.extend(f"- {item}" for item in limitations)
         lines.extend(f"- 检索缺口：{error}" for error in errors)

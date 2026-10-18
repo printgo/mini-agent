@@ -76,7 +76,7 @@ class EvidenceStore:
         task_id: str,
         status: str,
         *,
-        queries: list[str] | None = None,
+        queries: list[str | dict] | None = None,
         report: str | None = None,
         errors: list[str] | None = None,
     ) -> None:

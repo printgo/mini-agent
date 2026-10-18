@@ -2,8 +2,8 @@ import logging
 
 from agent.agent import MiniAgent
 from llm.client import MODEL
-from research.agent import ResearchAgent
-from research.store import EvidenceStore
+from research.documents import DocumentStore
+from research.multisource import MultiSourceResearchAgent
 
 
 def main():
@@ -11,13 +11,13 @@ def main():
         level=logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    print(f"MiniAgent V9.0 | Model: {MODEL}")
+    print(f"MiniAgent V10.0 | Model: {MODEL}")
     print("普通输入用于聊天；/research 问题 用于研究")
     print("/tasks 查看任务；/report ID 查看报告；/evidence ID 查看证据")
 
     agent = MiniAgent(session_id="session_001")
-    store = EvidenceStore(agent.memory.conn)
-    research = ResearchAgent(store)
+    store = DocumentStore(agent.memory.conn)
+    research = MultiSourceResearchAgent(store)
 
     try:
         while True:
@@ -37,9 +37,17 @@ def main():
                         continue
 
                     for number, query in enumerate(task["queries"], 1):
-                        print(f"{number}. {query}")
+                        print(
+                            f"{number}. "
+                            f"[{query['source']}] {query['query']}"
+                        )
 
-                    print("最多 3 次搜索，每次最多 3 条摘要。")
+                    print(
+                        "最多 3 项检索，每项最多 3 篇文档；"
+                        "正文/README 会额外发起读取请求。"
+                        "arXiv 网络错误最多重试 1 次；"
+                        "计划中的每类来源均须有可用片段。"
+                    )
                     approved = input(
                         "输入 yes 批准执行，其他输入取消："
                     ).strip()
@@ -67,6 +75,45 @@ def main():
                     task = store.get_task(text.split(maxsplit=1)[1])
                     print(f"任务状态：{task['status']}")
                     print(task["report"] or task["errors"] or "暂无报告")
+                
+                elif text.startswith("/documents "):
+                    for item in store.list_documents(
+                        text.split(maxsplit=1)[1]
+                    ):
+                        print(
+                            f"D{item['id']} | "
+                            f"{item['source_type']} | {item['title']}\n"
+                            f"{item['url']}\n"
+                            f"{item['metadata']}\n"
+                            f"获取时间：{item['retrieved_at']}"
+                        )
+
+                elif text.startswith("/chunks "):
+                    for item in store.list_chunks(
+                        text.split(maxsplit=1)[1]
+                    ):
+                        print(
+                            f"{item['evidence_id']} | 字符范围 "
+                            f"{item['start']}:{item['end']}\n"
+                            f"{item['content'][:160]}\n"
+                        )
+
+                elif text.startswith("/chunk "):
+                    _, task_id, chunk_id = text.split(maxsplit=2)
+
+                    item = next(
+                        (
+                            item
+                            for item in store.list_chunks(task_id)
+                            if item["evidence_id"] == chunk_id
+                        ),
+                        None,
+                    )
+                    if item is None:
+                        raise ValueError("该任务中不存在这个片段")
+
+                    print(item["url"])
+                    print(item["content"])
 
                 elif text.startswith("/evidence "):
                     task_id = text.split(maxsplit=1)[1]
