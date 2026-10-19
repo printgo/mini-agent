@@ -11,7 +11,7 @@ from tools.registry import execute_tool
 logger = logging.getLogger(__name__)
 
 
-class MiniAgent:
+class ResearchAgent:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.memory = Memory()

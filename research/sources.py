@@ -35,7 +35,7 @@ def _request(
     timeout=(5, 20),
 ) -> tuple[bytes, str]:
     headers = {
-        "User-Agent": "mini-agent/10.1",
+        "User-Agent": "research-agent/12.0",
         **(headers or {}),
     }
 

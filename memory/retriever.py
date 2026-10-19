@@ -70,8 +70,8 @@ MEMORY_RULES = {
     ],
 
     "project.name": [
-        "mini-agent",
-        "mini agent",
+        "research-agent",
+        "research agent",
         "项目",
         "继续开发",
         "继续下面的开发",
@@ -165,12 +165,12 @@ def retrieve_memories(
             )
 
     # ==============================
-    # 4. mini-agent 项目关联 Memory
+    # 4. research-agent 项目关联 Memory
     # ==============================
 
     if (
-        "mini-agent" in query
-        or "mini agent" in query
+        "research-agent" in query
+        or "research agent" in query
         or "继续开发" in query
     ):
 

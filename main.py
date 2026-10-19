@@ -6,7 +6,7 @@ from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from agent.agent import MiniAgent
+from agent.agent import ResearchAgent
 from llm.client import MODEL
 from memory.memory import DB_PATH
 from research.review_store import ReviewStore
@@ -58,11 +58,11 @@ def main():
         level=logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    print(f"MiniAgent V12.0 | Model: {MODEL}")
+    print(f"research-agent V12.0 | Model: {MODEL}")
     print("普通输入聊天；/research 问题 创建研究；exit 退出")
     print("/tasks | /report ID | /reviews ID | /state ID | /resume ID")
 
-    agent = MiniAgent(session_id="session_001")
+    agent = ResearchAgent(session_id="session_001")
     try:
         with ExitStack() as resources:
             # 图节点可能运行在线程池，不复用普通聊天的 SQLite 连接。

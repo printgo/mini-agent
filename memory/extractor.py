@@ -110,12 +110,12 @@ Question != Memory
   "value": "Java后端开发"
 }
 
-“请忘记我正在开发 mini-agent”
+“请忘记我正在开发 research-agent”
 仍然应该识别：
 {
   "category": "project",
   "key": "name",
-  "value": "mini-agent"
+  "value": "research-agent"
 }
 
 如果用户同时明确提供了新的替代事实，优先提取新的事实。
