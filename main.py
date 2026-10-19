@@ -1,24 +1,56 @@
 import json
 import logging
+import sqlite3
+from contextlib import ExitStack, closing
+from pathlib import Path
+
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from agent.agent import MiniAgent
 from llm.client import MODEL
+from memory.memory import DB_PATH
 from research.review_store import ReviewStore
-from research.deep import DeepResearchAgent
+from research.workflow import WorkflowResearchAgent
 
 
-def confirm_supplements(question, queries):
-    print("\n[Human] 待批准的补充检索")
-    print("原问题:", question)
+def show_task(task):
+    print(f"任务：{task['id']} | 状态：{task['status']}")
+    print(task["report"] or "\n".join(task["errors"]) or "暂无报告")
 
-    for number, item in enumerate(queries, 1):
+
+def drive(research, store, task_id, events):
+    while True:
+        for event in events:
+            for node in event:
+                if node != "__interrupt__":
+                    print(f"[Workflow] {node}")
+
+        info = research.inspect(task_id)
+        if not info["pending"]:
+            show_task(store.get_task(task_id))
+            return
+
+        pending = info["pending"][0]
+        print("\n[Human]", "初始检索审批" if pending["kind"] == "initial"
+              else "补充检索审批")
+        print("任务：", task_id)
+        print("问题：", pending["question"])
+        for number, query in enumerate(pending["queries"], 1):
+            print(f"{number}. [{query['source']}] {query['query']}")
+
         print(
-            f"{number}. [{item['source']}] {item['query']}"
+            f"已完成 {pending['round_no']}/{pending['max_rounds']} 轮；"
+            f"已使用 {pending['used_supplements']}/"
+            f"{pending['max_supplements']} 项补查。"
         )
-
-    return input(
-        "输入 yes 批准这批补充查询，其他输入停止："
-    ).strip().lower() == "yes"
+        print("每项最多 3 篇文档；正文请求和内部重试另计。")
+        answer = input(
+            "输入 yes 批准，no 拒绝，其他输入稍后处理："
+        ).strip().lower()
+        if answer not in {"yes", "no"}:
+            print(f"任务已暂停；使用 /resume {task_id} 继续。")
+            return
+        events = research.resume(task_id, approved=answer == "yes")
 
 
 def main():
@@ -26,169 +58,127 @@ def main():
         level=logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-
-    print(f"MiniAgent V11.0 | Model: {MODEL}")
-    print("普通输入用于聊天；/research 问题 用于研究")
-    print(
-        "/tasks 查看任务；/report ID 查看报告；"
-        "/reviews ID 查看审查记录"
-    )
+    print(f"MiniAgent V12.0 | Model: {MODEL}")
+    print("普通输入聊天；/research 问题 创建研究；exit 退出")
+    print("/tasks | /report ID | /reviews ID | /state ID | /resume ID")
 
     agent = MiniAgent(session_id="session_001")
-    store = ReviewStore(agent.memory.conn)
-    research = DeepResearchAgent(store)
-
     try:
-        while True:
-            text = input("\nYou: ").strip()
+        with ExitStack() as resources:
+            # 图节点可能运行在线程池，不复用普通聊天的 SQLite 连接。
+            conn = resources.enter_context(closing(sqlite3.connect(
+                DB_PATH, check_same_thread=False, timeout=30,
+            )))
+            store = ReviewStore(conn)
+            checkpoint_path = str(
+                Path(DB_PATH).with_name("research_checkpoints.db")
+            )
+            saver = resources.enter_context(
+                SqliteSaver.from_conn_string(checkpoint_path)
+            )
+            research = WorkflowResearchAgent(store, saver)
 
-            if text.lower() == "exit":
-                break
-            if not text:
-                continue
+            while True:
+                text = input("\nYou: ").strip()
+                if text.lower() == "exit":
+                    break
+                if not text:
+                    continue
 
-            try:
-                if text.startswith("/research "):
-                    task = research.prepare(
-                        text[len("/research "):]
-                    )
-                    print(
-                        f"任务：{task['id']} | "
-                        f"状态：{task['status']}"
-                    )
+                try:
+                    command, _, argument = text.partition(" ")
+                    argument = argument.strip()
 
-                    if task["status"] != "planned":
-                        print(task["errors"])
-                        continue
-
-                    for number, query in enumerate(
-                        task["queries"], 1
-                    ):
-                        print(
-                            f"{number}. "
-                            f"[{query['source']}] {query['query']}"
+                    if command == "/research":
+                        task = research.prepare(argument)
+                        print(f"任务：{task['id']} | 状态：{task['status']}")
+                        if task["status"] != "planned":
+                            show_task(task)
+                            continue
+                        drive(
+                            research, store, task["id"],
+                            research.start(task["id"]),
                         )
 
-                    print(
-                        "初始最多 3 项检索，每项最多 3 篇文档；"
-                        f"最多 {research.MAX_ROUNDS} 轮写作与审查，"
-                        f"额外最多 {research.MAX_SUPPLEMENTS} 项补充检索，"
-                        "每批补充查询单独审批。"
-                        "正文读取与内部重试另计；每类计划来源均为必需。"
-                    )
+                    elif command == "/resume":
+                        info = research.inspect(argument)
+                        if not info["exists"]:
+                            raise ValueError("该任务没有 V12 checkpoint")
+                        if not info["next"]:
+                            raise ValueError("任务已结束，不能重复执行")
+                        # 已暂停审批先展示原批次；异常中断则从 checkpoint 继续。
+                        events = () if info["pending"] else research.resume(argument)
+                        drive(research, store, argument, events)
 
-                    approved = input(
-                        "输入 yes 批准执行，其他输入取消："
-                    ).strip()
+                    elif command == "/state":
+                        print(json.dumps(
+                            research.inspect(argument),
+                            ensure_ascii=False, indent=2,
+                        ))
 
-                    task = research.run(
-                        task["id"],
-                        approved=approved.lower() == "yes",
-                        approve_more=lambda queries: confirm_supplements(
-                            task["question"], queries
-                        ),
-                    )
+                    elif command == "/tasks":
+                        for task in store.list_tasks():
+                            print(
+                                f"{task['id']} | {task['status']} | "
+                                f"{task['question']}"
+                            )
 
-                    print(f"任务状态：{task['status']}")
-                    print(
-                        task["report"]
-                        or "\n".join(task["errors"])
-                        or "已取消"
-                    )
+                    elif command == "/report":
+                        show_task(store.get_task(argument))
 
-                elif text == "/tasks":
-                    for task in store.list_tasks():
-                        print(
-                            f"{task['id']} | "
-                            f"{task['status']} | "
-                            f"{task['question']}"
-                        )
+                    elif command == "/reviews":
+                        print(json.dumps(
+                            store.list_reviews(argument),
+                            ensure_ascii=False, indent=2,
+                        ))
 
-                elif text.startswith("/reviews "):
-                    rows = store.list_reviews(
-                        text.split(maxsplit=1)[1]
-                    )
-                    print("各轮草稿与审查记录：")
-                    print(json.dumps(
-                        rows,
-                        ensure_ascii=False,
-                        indent=2,
-                    ))
+                    elif command == "/documents":
+                        for item in store.list_documents(argument):
+                            print(
+                                f"D{item['id']} | {item['source_type']} | "
+                                f"{item['title']}\n{item['url']}\n"
+                                f"{item['metadata']}\n"
+                                f"获取时间：{item['retrieved_at']}"
+                            )
 
-                elif text.startswith("/report "):
-                    task = store.get_task(
-                        text.split(maxsplit=1)[1]
-                    )
-                    print(f"任务状态：{task['status']}")
-                    print(
-                        task["report"]
-                        or task["errors"]
-                        or "暂无报告"
-                    )
+                    elif command == "/chunks":
+                        for item in store.list_chunks(argument):
+                            print(
+                                f"{item['evidence_id']} | 字符范围 "
+                                f"{item['start']}:{item['end']}\n"
+                                f"{item['content'][:160]}\n"
+                            )
 
-                elif text.startswith("/documents "):
-                    for item in store.list_documents(
-                        text.split(maxsplit=1)[1]
-                    ):
-                        print(
-                            f"D{item['id']} | "
-                            f"{item['source_type']} | {item['title']}\n"
-                            f"{item['url']}\n"
-                            f"{item['metadata']}\n"
-                            f"获取时间：{item['retrieved_at']}"
-                        )
-
-                elif text.startswith("/chunks "):
-                    for item in store.list_chunks(
-                        text.split(maxsplit=1)[1]
-                    ):
-                        print(
-                            f"{item['evidence_id']} | 字符范围 "
-                            f"{item['start']}:{item['end']}\n"
-                            f"{item['content'][:160]}\n"
-                        )
-
-                elif text.startswith("/chunk "):
-                    _, task_id, chunk_id = text.split(
-                        maxsplit=2
-                    )
-                    item = next(
-                        (
-                            item
-                            for item in store.list_chunks(task_id)
+                    elif command == "/chunk":
+                        task_id, chunk_id = argument.split(maxsplit=1)
+                        item = next((
+                            item for item in store.list_chunks(task_id)
                             if item["evidence_id"] == chunk_id
-                        ),
-                        None,
+                        ), None)
+                        if item is None:
+                            raise ValueError("该任务中不存在这个片段")
+                        print(item["url"])
+                        print(item["content"])
+
+                    elif command == "/evidence":
+                        for item in store.list_evidence(argument):
+                            print(
+                                f"{item['evidence_id']} | {item['title']}\n"
+                                f"{item['url']}\n{item['source_type']}\n"
+                                f"获取时间：{item['retrieved_at']}\n"
+                                f"{item['content']}\n"
+                            )
+
+                    else:
+                        print("\nAgent:", agent.run(text))
+
+                except Exception:
+                    logging.exception(
+                        "本轮运行失败；研究任务请用 /state ID 查看 checkpoint"
                     )
-
-                    if item is None:
-                        raise ValueError(
-                            "该任务中不存在这个片段"
-                        )
-
-                    print(item["url"])
-                    print(item["content"])
-
-                elif text.startswith("/evidence "):
-                    for item in store.list_evidence(
-                        text.split(maxsplit=1)[1]
-                    ):
-                        print(
-                            f"{item['evidence_id']} | {item['title']}\n"
-                            f"{item['url']}\n"
-                            f"来源类型：{item['source_type']}\n"
-                            f"获取时间：{item['retrieved_at']}\n"
-                            f"{item['content']}\n"
-                        )
-
-                else:
-                    print("\nAgent:", agent.run(text))
-
-            except Exception:
-                logging.exception("本轮运行失败")
 
     except (EOFError, KeyboardInterrupt):
-        print("\n退出程序")
+        print("\n退出程序；已保存的研究 checkpoint 可在下次恢复。")
     finally:
         agent.memory.conn.close()
 
