@@ -9,13 +9,22 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from agent.agent import ResearchAgent
 from llm.client import MODEL
 from memory.memory import DB_PATH
-from research.review_store import ReviewStore
+from research.recovery import RecoveryStore, RecoveryWorkflowAgent
 from research.workflow import WorkflowResearchAgent
 
 
 def show_task(task):
     print(f"任务：{task['id']} | 状态：{task['status']}")
     print(task["report"] or "\n".join(task["errors"]) or "暂无报告")
+
+
+def select_research(task_id, research, legacy):
+    version = research.checkpoint_version(task_id)
+    if version is None or version == research.VERSION:
+        return research
+    if version == legacy.VERSION:
+        return legacy
+    raise ValueError(f"不支持 checkpoint 版本：{version}")
 
 
 def drive(research, store, task_id, events):
@@ -58,25 +67,28 @@ def main():
         level=logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    print(f"research-agent V12.0 | Model: {MODEL}")
+    print(f"research-agent V13.0 | Model: {MODEL}")
     print("普通输入聊天；/research 问题 创建研究；exit 退出")
     print("/tasks | /report ID | /reviews ID | /state ID | /resume ID")
+    print("/collections ID | /documents ID | /chunks ID")
+    print("/chunk ID 片段编号 | /evidence ID")
+    print("已有 V12 checkpoint 按 V12 规则恢复，新任务使用 V13。")
 
     agent = ResearchAgent(session_id="session_001")
     try:
         with ExitStack() as resources:
-            # 图节点可能运行在线程池，不复用普通聊天的 SQLite 连接。
             conn = resources.enter_context(closing(sqlite3.connect(
                 DB_PATH, check_same_thread=False, timeout=30,
             )))
-            store = ReviewStore(conn)
+            store = RecoveryStore(conn)
             checkpoint_path = str(
                 Path(DB_PATH).with_name("research_checkpoints.db")
             )
             saver = resources.enter_context(
                 SqliteSaver.from_conn_string(checkpoint_path)
             )
-            research = WorkflowResearchAgent(store, saver)
+            research = RecoveryWorkflowAgent(store, saver)
+            legacy = WorkflowResearchAgent(store, saver)
 
             while True:
                 text = input("\nYou: ").strip()
@@ -101,18 +113,33 @@ def main():
                         )
 
                     elif command == "/resume":
-                        info = research.inspect(argument)
+                        selected = select_research(argument, research, legacy)
+                        info = selected.inspect(argument)
                         if not info["exists"]:
-                            raise ValueError("该任务没有 V12 checkpoint")
-                        if not info["next"]:
+                            task = store.get_task(argument)
+                            if task["status"] != "planned":
+                                raise ValueError(
+                                    "任务没有 checkpoint，且不是 planned 状态"
+                                )
+                            events = selected.start(argument)
+                        elif not info["next"]:
                             raise ValueError("任务已结束，不能重复执行")
-                        # 已暂停审批先展示原批次；异常中断则从 checkpoint 继续。
-                        events = () if info["pending"] else research.resume(argument)
-                        drive(research, store, argument, events)
+                        else:
+                            events = (
+                                () if info["pending"]
+                                else selected.resume(argument)
+                            )
+                        drive(selected, store, argument, events)
 
                     elif command == "/state":
+                        selected = select_research(argument, research, legacy)
+                        info = selected.inspect(argument)
+                        info["version"] = research.checkpoint_version(argument)
+                        print(json.dumps(info, ensure_ascii=False, indent=2))
+
+                    elif command == "/collections":
                         print(json.dumps(
-                            research.inspect(argument),
+                            store.list_collections(argument),
                             ensure_ascii=False, indent=2,
                         ))
 
@@ -169,12 +196,16 @@ def main():
                                 f"{item['content']}\n"
                             )
 
+                    elif command.startswith("/"):
+                        raise ValueError(f"未知命令：{command}")
+
                     else:
                         print("\nAgent:", agent.run(text))
 
                 except Exception:
                     logging.exception(
-                        "本轮运行失败；研究任务请用 /state ID 查看 checkpoint"
+                        "本轮运行失败；研究任务请用 /state ID 查看，"
+                        "用 /resume ID 恢复"
                     )
 
     except (EOFError, KeyboardInterrupt):
