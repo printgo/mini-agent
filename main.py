@@ -9,7 +9,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from agent.agent import ResearchAgent
 from llm.client import MODEL
 from memory.memory import DB_PATH
-from research.recovery import RecoveryStore, RecoveryWorkflowAgent
+from research.generation import GenerationStore, GenerationWorkflowAgent
+from research.recovery import RecoveryWorkflowAgent
 from research.workflow import WorkflowResearchAgent
 
 
@@ -18,13 +19,13 @@ def show_task(task):
     print(task["report"] or "\n".join(task["errors"]) or "暂无报告")
 
 
-def select_research(task_id, research, legacy):
+def select_research(task_id, research, versions):
     version = research.checkpoint_version(task_id)
-    if version is None or version == research.VERSION:
+    if version is None:
         return research
-    if version == legacy.VERSION:
-        return legacy
-    raise ValueError(f"不支持 checkpoint 版本：{version}")
+    if version not in versions:
+        raise ValueError(f"不支持 checkpoint 版本：{version}")
+    return versions[version]
 
 
 def drive(research, store, task_id, events):
@@ -67,12 +68,12 @@ def main():
         level=logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    print(f"research-agent V13.0 | Model: {MODEL}")
+    print(f"research-agent V14.0 | Model: {MODEL}")
     print("普通输入聊天；/research 问题 创建研究；exit 退出")
     print("/tasks | /report ID | /reviews ID | /state ID | /resume ID")
-    print("/collections ID | /documents ID | /chunks ID")
+    print("/collections ID | /generations ID | /documents ID | /chunks ID")
     print("/chunk ID 片段编号 | /evidence ID")
-    print("已有 V12 checkpoint 按 V12 规则恢复，新任务使用 V13。")
+    print("已有 V12/V13 checkpoint 按原版本恢复，新任务使用 V14。")
 
     agent = ResearchAgent(session_id="session_001")
     try:
@@ -80,15 +81,19 @@ def main():
             conn = resources.enter_context(closing(sqlite3.connect(
                 DB_PATH, check_same_thread=False, timeout=30,
             )))
-            store = RecoveryStore(conn)
+            store = GenerationStore(conn)
             checkpoint_path = str(
                 Path(DB_PATH).with_name("research_checkpoints.db")
             )
             saver = resources.enter_context(
                 SqliteSaver.from_conn_string(checkpoint_path)
             )
-            research = RecoveryWorkflowAgent(store, saver)
-            legacy = WorkflowResearchAgent(store, saver)
+            research = GenerationWorkflowAgent(store, saver)
+            versions = {
+                WorkflowResearchAgent.VERSION: WorkflowResearchAgent(store, saver),
+                RecoveryWorkflowAgent.VERSION: RecoveryWorkflowAgent(store, saver),
+                research.VERSION: research,
+            }
 
             while True:
                 text = input("\nYou: ").strip()
@@ -113,7 +118,7 @@ def main():
                         )
 
                     elif command == "/resume":
-                        selected = select_research(argument, research, legacy)
+                        selected = select_research(argument, research, versions)
                         info = selected.inspect(argument)
                         if not info["exists"]:
                             task = store.get_task(argument)
@@ -132,7 +137,7 @@ def main():
                         drive(selected, store, argument, events)
 
                     elif command == "/state":
-                        selected = select_research(argument, research, legacy)
+                        selected = select_research(argument, research, versions)
                         info = selected.inspect(argument)
                         info["version"] = research.checkpoint_version(argument)
                         print(json.dumps(info, ensure_ascii=False, indent=2))
@@ -140,6 +145,12 @@ def main():
                     elif command == "/collections":
                         print(json.dumps(
                             store.list_collections(argument),
+                            ensure_ascii=False, indent=2,
+                        ))
+
+                    elif command == "/generations":
+                        print(json.dumps(
+                            store.list_generations(argument),
                             ensure_ascii=False, indent=2,
                         ))
 
