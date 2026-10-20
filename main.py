@@ -13,6 +13,8 @@ from research.generation import GenerationStore, GenerationWorkflowAgent
 from research.recovery import RecoveryWorkflowAgent
 from research.workflow import WorkflowResearchAgent
 from research.runtime import TaskController, TaskControlError, TaskStateError
+from research.management import BudgetLedger, TaskMaintenance
+from research.limited import LimitedWorkflowAgent
 
 
 class ManagedWorkflowAgent(GenerationWorkflowAgent):
@@ -69,13 +71,16 @@ def main():
         level=logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    print(f"research-agent V15.0 | Model: {MODEL}")
+    print(f"research-agent V16.0 | Model: {MODEL}")
     print("普通输入聊天；/research 问题 创建研究；exit 退出")
     print("/tasks | /report ID | /reviews ID | /state ID | /resume ID")
     print("/retry ID | /cancel ID | /failures ID")
+    print("/usage ID | /limits ID 模型上限 查询上限")
+    print("/cache ID | /cache-clear ID [天数] | /cache-drop ID")
     print("/collections ID | /generations ID | /documents ID | /chunks ID")
     print("/chunk ID 片段编号 | /evidence ID")
-    print("已有 V12/V13/V14 checkpoint 按原版本恢复，新任务使用 V15。")
+    print("已有 V12～V15 checkpoint 按原版本恢复，新任务使用 V16。")
+    print("V16 默认写作/审查调用 12 次、采集查询 8 次；规划和内部请求另计。")
 
     agent = ResearchAgent(session_id="session_001")
     try:
@@ -84,20 +89,23 @@ def main():
                 DB_PATH, check_same_thread=False, timeout=30,
             )))
             store = GenerationStore(conn)
+            ledger = BudgetLedger(conn)
             checkpoint_path = str(
                 Path(DB_PATH).with_name("research_checkpoints.db")
             )
             saver = resources.enter_context(
                 SqliteSaver.from_conn_string(checkpoint_path)
             )
-            research = ManagedWorkflowAgent(store, saver)
+            research = LimitedWorkflowAgent(store, saver, ledger)
             versions = {
                 WorkflowResearchAgent.VERSION: WorkflowResearchAgent(store, saver),
                 RecoveryWorkflowAgent.VERSION: RecoveryWorkflowAgent(store, saver),
                 GenerationWorkflowAgent.VERSION: GenerationWorkflowAgent(store, saver),
+                ManagedWorkflowAgent.VERSION: ManagedWorkflowAgent(store, saver),
                 research.VERSION: research,
             }
             controller = TaskController(store, research, versions, DB_PATH)
+            maintenance = TaskMaintenance(controller, ledger)
 
             while True:
                 text = input("\nYou: ").strip()
@@ -154,6 +162,52 @@ def main():
                     elif command == "/failures":
                         print(json.dumps(
                             controller.list_failures(argument),
+                            ensure_ascii=False, indent=2,
+                        ))
+
+                    elif command == "/usage":
+                        print(json.dumps(
+                            maintenance.usage(argument),
+                            ensure_ascii=False, indent=2,
+                        ))
+
+                    elif command == "/limits":
+                        parts = argument.split()
+                        if len(parts) != 3:
+                            raise TaskStateError("用法：/limits ID 模型上限 查询上限")
+                        try:
+                            model_limit, query_limit = map(int, parts[1:])
+                        except ValueError:
+                            raise TaskStateError("调用上限必须为整数") from None
+                        print(json.dumps(
+                            maintenance.set_limits(
+                                parts[0], model_limit, query_limit
+                            ),
+                            ensure_ascii=False, indent=2,
+                        ))
+
+                    elif command == "/cache":
+                        print(json.dumps(
+                            maintenance.cache_stats(argument),
+                            ensure_ascii=False, indent=2,
+                        ))
+
+                    elif command == "/cache-clear":
+                        parts = argument.split()
+                        if len(parts) not in {1, 2}:
+                            raise TaskStateError("用法：/cache-clear ID [天数]")
+                        try:
+                            days = int(parts[1]) if len(parts) == 2 else 0
+                        except ValueError:
+                            raise TaskStateError("清理天数必须为整数") from None
+                        print(json.dumps(
+                            maintenance.purge_cache(parts[0], days),
+                            ensure_ascii=False, indent=2,
+                        ))
+
+                    elif command == "/cache-drop":
+                        print(json.dumps(
+                            maintenance.invalidate_current_generation(argument),
                             ensure_ascii=False, indent=2,
                         ))
 
