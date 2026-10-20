@@ -12,6 +12,11 @@ from memory.memory import DB_PATH
 from research.generation import GenerationStore, GenerationWorkflowAgent
 from research.recovery import RecoveryWorkflowAgent
 from research.workflow import WorkflowResearchAgent
+from research.runtime import TaskController, TaskControlError, TaskStateError
+
+
+class ManagedWorkflowAgent(GenerationWorkflowAgent):
+    VERSION = "15.0"
 
 
 def show_task(task):
@@ -19,21 +24,17 @@ def show_task(task):
     print(task["report"] or "\n".join(task["errors"]) or "暂无报告")
 
 
-def select_research(task_id, research, versions):
-    version = research.checkpoint_version(task_id)
-    if version is None:
-        return research
-    if version not in versions:
-        raise ValueError(f"不支持 checkpoint 版本：{version}")
-    return versions[version]
-
-
 def drive(research, store, task_id, events):
     while True:
-        for event in events:
-            for node in event:
-                if node != "__interrupt__":
-                    print(f"[Workflow] {node}")
+        try:
+            for event in events:
+                for node in event:
+                    if node != "__interrupt__":
+                        print(f"[Workflow] {node}")
+        finally:
+            close = getattr(events, "close", None)
+            if close is not None:
+                close()
 
         info = research.inspect(task_id)
         if not info["pending"]:
@@ -68,12 +69,13 @@ def main():
         level=logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    print(f"research-agent V14.0 | Model: {MODEL}")
+    print(f"research-agent V15.0 | Model: {MODEL}")
     print("普通输入聊天；/research 问题 创建研究；exit 退出")
     print("/tasks | /report ID | /reviews ID | /state ID | /resume ID")
+    print("/retry ID | /cancel ID | /failures ID")
     print("/collections ID | /generations ID | /documents ID | /chunks ID")
     print("/chunk ID 片段编号 | /evidence ID")
-    print("已有 V12/V13 checkpoint 按原版本恢复，新任务使用 V14。")
+    print("已有 V12/V13/V14 checkpoint 按原版本恢复，新任务使用 V15。")
 
     agent = ResearchAgent(session_id="session_001")
     try:
@@ -88,12 +90,14 @@ def main():
             saver = resources.enter_context(
                 SqliteSaver.from_conn_string(checkpoint_path)
             )
-            research = GenerationWorkflowAgent(store, saver)
+            research = ManagedWorkflowAgent(store, saver)
             versions = {
                 WorkflowResearchAgent.VERSION: WorkflowResearchAgent(store, saver),
                 RecoveryWorkflowAgent.VERSION: RecoveryWorkflowAgent(store, saver),
+                GenerationWorkflowAgent.VERSION: GenerationWorkflowAgent(store, saver),
                 research.VERSION: research,
             }
+            controller = TaskController(store, research, versions, DB_PATH)
 
             while True:
                 text = input("\nYou: ").strip()
@@ -112,35 +116,46 @@ def main():
                         if task["status"] != "planned":
                             show_task(task)
                             continue
-                        drive(
-                            research, store, task["id"],
-                            research.start(task["id"]),
-                        )
-
-                    elif command == "/resume":
-                        selected = select_research(argument, research, versions)
-                        info = selected.inspect(argument)
-                        if not info["exists"]:
-                            task = store.get_task(argument)
-                            if task["status"] != "planned":
-                                raise ValueError(
-                                    "任务没有 checkpoint，且不是 planned 状态"
-                                )
-                            events = selected.start(argument)
-                        elif not info["next"]:
-                            raise ValueError("任务已结束，不能重复执行")
-                        else:
-                            events = (
-                                () if info["pending"]
-                                else selected.resume(argument)
+                        with controller.session(task["id"]) as selected:
+                            drive(
+                                selected, store, task["id"],
+                                selected.start(task["id"]),
                             )
-                        drive(selected, store, argument, events)
+
+                    elif command in {"/resume", "/retry"}:
+                        with controller.session(argument) as selected:
+                            info = selected.inspect(argument)
+                            if not info["exists"]:
+                                task = store.get_task(argument)
+                                if task["status"] != "planned":
+                                    raise TaskStateError(
+                                        "任务没有 checkpoint，且不是 planned 状态"
+                                    )
+                                events = selected.start(argument)
+                            elif not info["next"]:
+                                raise TaskStateError("任务已结束，不能重复执行")
+                            else:
+                                events = (
+                                    () if info["pending"]
+                                    else selected.resume(argument)
+                                )
+                            drive(selected, store, argument, events)
 
                     elif command == "/state":
-                        selected = select_research(argument, research, versions)
-                        info = selected.inspect(argument)
-                        info["version"] = research.checkpoint_version(argument)
-                        print(json.dumps(info, ensure_ascii=False, indent=2))
+                        print(json.dumps(
+                            controller.inspect(argument),
+                            ensure_ascii=False, indent=2,
+                        ))
+
+                    elif command == "/cancel":
+                        task = controller.cancel(argument)
+                        print(f"任务：{task['id']} | 状态：{task['status']}")
+
+                    elif command == "/failures":
+                        print(json.dumps(
+                            controller.list_failures(argument),
+                            ensure_ascii=False, indent=2,
+                        ))
 
                     elif command == "/collections":
                         print(json.dumps(
@@ -213,6 +228,8 @@ def main():
                     else:
                         print("\nAgent:", agent.run(text))
 
+                except TaskControlError as error:
+                    print(f"[Task] {error}")
                 except Exception:
                     logging.exception(
                         "本轮运行失败；研究任务请用 /state ID 查看，"
