@@ -1,12 +1,14 @@
 import json
 import logging
 
-from llm.client import chat
+from llm.client import chat, MAX_OUTPUT_TOKENS
 from memory.extractor import extract_memories
 from memory.memory import Memory
 from memory.retriever import retrieve_memories
 from memory.updater import decide_memory_action
-from tools.registry import execute_tool
+from tools.registry import execute_tool, get_tool_schemas
+from research.context import TokenContext
+from research.knowledge import KnowledgeStore
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,9 @@ class ResearchAgent:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.memory = Memory()
+        self.knowledge = KnowledgeStore(self.memory.conn)
+        self.context = TokenContext(reserve=MAX_OUTPUT_TOKENS)
+        self.knowledge.seed_chat(self.memory.get_memories())
 
         self.system_prompt = (
             "你是一个AI Research Agent。"
@@ -58,10 +63,25 @@ class ResearchAgent:
                 f"{memory_text}"
             )
 
-        return [
+        return self.context.chat([
             {"role": "system", "content": system_content},
             *self.messages,
-        ]
+        ], tools=get_tool_schemas())
+
+    def _sync_research_memory(self, category, key, value, action):
+        # 旧聊天入口是单用户；只同步到 default 研究档案。
+        kind = "topic" if category == "research" else "preference"
+        name = category + "." + key
+        if action in {"DELETE", "KEEP"}:
+            self.knowledge.apply("default", action, kind, name)
+            return
+        row = self.memory.conn.execute(
+            "SELECT 1 FROM research_knowledge WHERE user_id='default' AND kind=? AND key=?",
+            (kind, name),
+        ).fetchone()
+        self.knowledge.apply(
+            "default", "UPDATE" if row else "ADD", kind, name, str(value)
+        )
 
     def _contains_memory_change_signal(self, user_input: str) -> bool:
         """保留原有的记忆修改、否定、删除信号判断。"""
@@ -106,6 +126,7 @@ class ResearchAgent:
                     "[Memory] reason = 新旧值一致，直接 KEEP，"
                     "跳过 Memory Updater 调用"
                 )
+                self._sync_research_memory(category, key, new_value, "ADD")
                 continue
 
             decision = decide_memory_action(
@@ -144,6 +165,7 @@ class ResearchAgent:
                 self.memory.delete_memory(category=category, key=key)
             elif action == "KEEP":
                 pass
+            self._sync_research_memory(category, key, final_value, action)
 
     def run(self, user_input: str) -> str:
         """执行一次对话；长期记忆失败时继续回答。"""

@@ -6,3 +6,6 @@ data/*.db
 data/*.db-*
 # Generated report packages
 /exports/
+# Local V19 model weights and vector index
+/data/models/
+/data/qdrant/

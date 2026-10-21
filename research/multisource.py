@@ -11,6 +11,7 @@ SOURCE_TYPES = {
     "web": {"web_text", "web_summary"},
     "paper": {"paper_abstract"},
     "github": {"github_readme"},
+    "local": {"local_document"},
 }
 
 
@@ -83,7 +84,7 @@ def normalize_plan(queries: list) -> list[dict]:
 
         if (
             not isinstance(source, str)
-            or source not in {"web", "paper", "github"}
+            or source not in {"web", "paper", "github", "local"}
             or not isinstance(query, str)
             or not 1 <= len(query.strip()) <= 200
         ):

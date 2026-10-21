@@ -10,6 +10,7 @@ SOURCE_TYPES = {
     "web": {"web_text", "web_summary"},
     "paper": {"paper_abstract"},
     "github": {"github_readme"},
+    "local": {"local_document"},
 }
 REPORT_SCOPE = (
     "本报告依据检索片段生成，正文和 README 均为限长快照。"

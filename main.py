@@ -1,300 +1,191 @@
+import argparse
 import json
-import logging
+import os
 import sqlite3
 from contextlib import ExitStack, closing
 from pathlib import Path
 
-from langgraph.checkpoint.sqlite import SqliteSaver
 
-from agent.agent import ResearchAgent
-from llm.client import MODEL
-from memory.memory import DB_PATH
-from research.generation import GenerationStore, GenerationWorkflowAgent
-from research.recovery import RecoveryWorkflowAgent
-from research.workflow import WorkflowResearchAgent
-from research.runtime import TaskController, TaskControlError, TaskStateError
-from research.management import BudgetLedger, TaskMaintenance
-from research.limited import LimitedWorkflowAgent
+def show(value):
+    print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
-class ManagedWorkflowAgent(GenerationWorkflowAgent):
-    VERSION = "15.0"
-
-
-def show_task(task):
-    print(f"任务：{task['id']} | 状态：{task['status']}")
-    print(task["report"] or "\n".join(task["errors"]) or "暂无报告")
-
-
-def drive(research, store, task_id, events):
+def drive(selected, store, task_id, events):
     while True:
         try:
             for event in events:
                 for node in event:
-                    if node != "__interrupt__":
-                        print(f"[Workflow] {node}")
+                    print("[Workflow]", node)
         finally:
             close = getattr(events, "close", None)
             if close is not None:
                 close()
-
-        info = research.inspect(task_id)
+        info = selected.inspect(task_id)
         if not info["pending"]:
-            show_task(store.get_task(task_id))
+            task = store.get_task(task_id)
+            show({"task_id": task_id, "status": task["status"]})
+            print(task["report"] or "\n".join(task["errors"]))
             return
-
-        pending = info["pending"][0]
-        print("\n[Human]", "初始检索审批" if pending["kind"] == "initial"
-              else "补充检索审批")
-        print("任务：", task_id)
-        print("问题：", pending["question"])
-        for number, query in enumerate(pending["queries"], 1):
-            print(f"{number}. [{query['source']}] {query['query']}")
-
-        print(
-            f"已完成 {pending['round_no']}/{pending['max_rounds']} 轮；"
-            f"已使用 {pending['used_supplements']}/"
-            f"{pending['max_supplements']} 项补查。"
-        )
-        print("每项最多 3 篇文档；正文请求和内部重试另计。")
-        answer = input(
-            "输入 yes 批准，no 拒绝，其他输入稍后处理："
-        ).strip().lower()
+        show(info["pending"][0])
+        answer = input("输入 yes 批准，no 拒绝，其他输入暂停：").strip().lower()
         if answer not in {"yes", "no"}:
-            print(f"任务已暂停；使用 /resume {task_id} 继续。")
+            print(f"任务已保存：使用 --resume {task_id} 继续")
             return
-        events = research.resume(task_id, approved=answer == "yes")
+        events = selected.resume(task_id, approved=answer == "yes")
 
 
-def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
-    print(f"research-agent V16.0 | Model: {MODEL}")
-    print("普通输入聊天；/research 问题 创建研究；exit 退出")
-    print("/tasks | /report ID | /reviews ID | /state ID | /resume ID")
-    print("/retry ID | /cancel ID | /failures ID")
-    print("/usage ID | /limits ID 模型上限 查询上限")
-    print("/cache ID | /cache-clear ID [天数] | /cache-drop ID")
-    print("/collections ID | /generations ID | /documents ID | /chunks ID")
-    print("/chunk ID 片段编号 | /evidence ID")
-    print("已有 V12～V15 checkpoint 按原版本恢复，新任务使用 V16。")
-    print("V16 默认写作/审查调用 12 次、采集查询 8 次；规划和内部请求另计。")
-
-    agent = ResearchAgent(session_id="session_001")
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="V19 多 Agent 研究与长期记忆")
+    parser.add_argument("--user", default="default", help="本地研究档案，不是登录鉴权")
+    parser.add_argument("--db", default="data/memory.db")
+    parser.add_argument("--index", default="data/qdrant")
+    parser.add_argument("--models", default="data/models")
+    parser.add_argument("--context-limit", type=int, default=16000)
+    parser.add_argument("--file", action="append", default=[])
+    parser.add_argument("--local-only", action="store_true")
+    parser.add_argument("--evidence", nargs="+", default=[])
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--question")
+    mode.add_argument("--resume")
+    mode.add_argument("--state")
+    mode.add_argument("--cancel")
+    mode.add_argument("--usage")
+    mode.add_argument("--results")
+    mode.add_argument("--limits", nargs=3, metavar=("ID", "MODEL", "QUERY"))
+    mode.add_argument("--memory", nargs=4, metavar=("ACTION", "KIND", "KEY", "VALUE"))
+    mode.add_argument("--memories", metavar="QUERY")
+    mode.add_argument("--confirm", nargs=3, metavar=("ID", "KEY", "TEXT"))
+    mode.add_argument("--warmup", action="store_true")
+    args = parser.parse_args(argv)
+    if (args.file or args.local_only) and args.question is None:
+        parser.error("--file/--local-only 只能用于 --question")
     try:
-        with ExitStack() as resources:
-            conn = resources.enter_context(closing(sqlite3.connect(
-                DB_PATH, check_same_thread=False, timeout=30,
+        os.environ.setdefault(
+            "TIKTOKEN_CACHE_DIR", str(Path(args.models).resolve() / "tiktoken")
+        )
+        if args.warmup:
+            import tiktoken
+            from research.vector import HybridIndex
+            tiktoken.get_encoding("cl100k_base")
+            HybridIndex(args.index, cache_dir=args.models)._load()
+            print("Tokenizer、Embedding、Reranker 预热完成")
+            return 0
+
+        db_path = Path(args.db).resolve()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with ExitStack() as stack:
+            conn = stack.enter_context(closing(sqlite3.connect(
+                db_path, check_same_thread=False, timeout=30
             )))
+            from research.knowledge import KnowledgeStore
+            knowledge = KnowledgeStore(conn)
+            if args.memory:
+                action, kind, key, value = args.memory
+                knowledge.apply(args.user, action, kind, key, value)
+                show({"action": action, "kind": kind, "key": key})
+                return 0
+            if args.memories is not None:
+                show(knowledge.retrieve(args.user, args.memories, limit=20))
+                return 0
+            if args.confirm:
+                task_id, key, text = args.confirm
+                from research.runtime import TaskFileLock
+                with TaskFileLock(db_path, task_id):
+                    knowledge.confirm(args.user, task_id, key, text, args.evidence)
+                print("已保存人工确认结论；影响下一次研究，已有任务仍使用冻结记忆")
+                return 0
+
+            from langgraph.checkpoint.sqlite import SqliteSaver
+            from research.generation import GenerationStore, GenerationWorkflowAgent
+            from research.limited import LimitedWorkflowAgent
+            from research.management import BudgetLedger, TaskMaintenance
+            from research.recovery import RecoveryWorkflowAgent
+            from research.runtime import TaskStateError
+            from research.engine import TeamController, TeamWorkflowAgent
+            from research.workflow import WorkflowResearchAgent
+
+            class Legacy15(GenerationWorkflowAgent):
+                VERSION = "15.0"
+
             store = GenerationStore(conn)
             ledger = BudgetLedger(conn)
-            checkpoint_path = str(
-                Path(DB_PATH).with_name("research_checkpoints.db")
+            saver = stack.enter_context(SqliteSaver.from_conn_string(
+                str(db_path.with_name("research_checkpoints.db"))
+            ))
+            research = TeamWorkflowAgent(
+                store, saver, ledger, user_id=args.user,
+                index_path=args.index, model_cache=args.models, db_path=db_path,
+                context_limit=args.context_limit,
             )
-            saver = resources.enter_context(
-                SqliteSaver.from_conn_string(checkpoint_path)
-            )
-            research = LimitedWorkflowAgent(store, saver, ledger)
-            versions = {
-                WorkflowResearchAgent.VERSION: WorkflowResearchAgent(store, saver),
-                RecoveryWorkflowAgent.VERSION: RecoveryWorkflowAgent(store, saver),
-                GenerationWorkflowAgent.VERSION: GenerationWorkflowAgent(store, saver),
-                ManagedWorkflowAgent.VERSION: ManagedWorkflowAgent(store, saver),
-                research.VERSION: research,
-            }
-            controller = TaskController(store, research, versions, DB_PATH)
+            old = [
+                WorkflowResearchAgent(store, saver),
+                RecoveryWorkflowAgent(store, saver),
+                GenerationWorkflowAgent(store, saver),
+                Legacy15(store, saver),
+                LimitedWorkflowAgent(store, saver, ledger),
+            ]
+            versions = {item.VERSION: item for item in [*old, research]}
+            controller = TeamController(store, research, versions, db_path)
             maintenance = TaskMaintenance(controller, ledger)
 
-            while True:
-                text = input("\nYou: ").strip()
-                if text.lower() == "exit":
-                    break
-                if not text:
-                    continue
+            if args.question:
+                task = research.prepare(
+                    args.question, files=args.file, local_only=args.local_only
+                )
+                show({"task_id": task["id"], "status": task["status"]})
+                if task["status"] != "planned":
+                    show(task["errors"])
+                    return 1
+                with controller.session(task["id"]) as selected:
+                    drive(selected, store, task["id"], selected.start(task["id"]))
+                return 0
 
-                try:
-                    command, _, argument = text.partition(" ")
-                    argument = argument.strip()
-
-                    if command == "/research":
-                        task = research.prepare(argument)
-                        print(f"任务：{task['id']} | 状态：{task['status']}")
-                        if task["status"] != "planned":
-                            show_task(task)
-                            continue
-                        with controller.session(task["id"]) as selected:
-                            drive(
-                                selected, store, task["id"],
-                                selected.start(task["id"]),
-                            )
-
-                    elif command in {"/resume", "/retry"}:
-                        with controller.session(argument) as selected:
-                            info = selected.inspect(argument)
-                            if not info["exists"]:
-                                task = store.get_task(argument)
-                                if task["status"] != "planned":
-                                    raise TaskStateError(
-                                        "任务没有 checkpoint，且不是 planned 状态"
-                                    )
-                                events = selected.start(argument)
-                            elif not info["next"]:
-                                raise TaskStateError("任务已结束，不能重复执行")
-                            else:
-                                events = (
-                                    () if info["pending"]
-                                    else selected.resume(argument)
-                                )
-                            drive(selected, store, argument, events)
-
-                    elif command == "/state":
-                        print(json.dumps(
-                            controller.inspect(argument),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/cancel":
-                        task = controller.cancel(argument)
-                        print(f"任务：{task['id']} | 状态：{task['status']}")
-
-                    elif command == "/failures":
-                        print(json.dumps(
-                            controller.list_failures(argument),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/usage":
-                        print(json.dumps(
-                            maintenance.usage(argument),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/limits":
-                        parts = argument.split()
-                        if len(parts) != 3:
-                            raise TaskStateError("用法：/limits ID 模型上限 查询上限")
-                        try:
-                            model_limit, query_limit = map(int, parts[1:])
-                        except ValueError:
-                            raise TaskStateError("调用上限必须为整数") from None
-                        print(json.dumps(
-                            maintenance.set_limits(
-                                parts[0], model_limit, query_limit
-                            ),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/cache":
-                        print(json.dumps(
-                            maintenance.cache_stats(argument),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/cache-clear":
-                        parts = argument.split()
-                        if len(parts) not in {1, 2}:
-                            raise TaskStateError("用法：/cache-clear ID [天数]")
-                        try:
-                            days = int(parts[1]) if len(parts) == 2 else 0
-                        except ValueError:
-                            raise TaskStateError("清理天数必须为整数") from None
-                        print(json.dumps(
-                            maintenance.purge_cache(parts[0], days),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/cache-drop":
-                        print(json.dumps(
-                            maintenance.invalidate_current_generation(argument),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/collections":
-                        print(json.dumps(
-                            store.list_collections(argument),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/generations":
-                        print(json.dumps(
-                            store.list_generations(argument),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/tasks":
-                        for task in store.list_tasks():
-                            print(
-                                f"{task['id']} | {task['status']} | "
-                                f"{task['question']}"
-                            )
-
-                    elif command == "/report":
-                        show_task(store.get_task(argument))
-
-                    elif command == "/reviews":
-                        print(json.dumps(
-                            store.list_reviews(argument),
-                            ensure_ascii=False, indent=2,
-                        ))
-
-                    elif command == "/documents":
-                        for item in store.list_documents(argument):
-                            print(
-                                f"D{item['id']} | {item['source_type']} | "
-                                f"{item['title']}\n{item['url']}\n"
-                                f"{item['metadata']}\n"
-                                f"获取时间：{item['retrieved_at']}"
-                            )
-
-                    elif command == "/chunks":
-                        for item in store.list_chunks(argument):
-                            print(
-                                f"{item['evidence_id']} | 字符范围 "
-                                f"{item['start']}:{item['end']}\n"
-                                f"{item['content'][:160]}\n"
-                            )
-
-                    elif command == "/chunk":
-                        task_id, chunk_id = argument.split(maxsplit=1)
-                        item = next((
-                            item for item in store.list_chunks(task_id)
-                            if item["evidence_id"] == chunk_id
-                        ), None)
-                        if item is None:
-                            raise ValueError("该任务中不存在这个片段")
-                        print(item["url"])
-                        print(item["content"])
-
-                    elif command == "/evidence":
-                        for item in store.list_evidence(argument):
-                            print(
-                                f"{item['evidence_id']} | {item['title']}\n"
-                                f"{item['url']}\n{item['source_type']}\n"
-                                f"获取时间：{item['retrieved_at']}\n"
-                                f"{item['content']}\n"
-                            )
-
-                    elif command.startswith("/"):
-                        raise ValueError(f"未知命令：{command}")
-
+            task_id = next(
+                value for value in (
+                    args.resume, args.state, args.cancel, args.usage,
+                    args.results, args.limits[0] if args.limits else None,
+                ) if value is not None
+            )
+            owner = knowledge.owner(task_id)
+            if owner is not None:
+                knowledge.assert_owner(args.user, task_id)
+            elif args.user != "default":
+                raise PermissionError("未绑定用户的旧任务只能由 default 档案访问")
+            if args.state:
+                show(controller.inspect(task_id))
+            elif args.cancel:
+                show(controller.cancel(task_id))
+            elif args.usage:
+                value = maintenance.usage(task_id)
+                if controller._select(task_id).VERSION == "19.0":
+                    value["scope"] = "规划/写作/审查模型调用与远程查询尝试；内部重试另计"
+                show(value)
+            elif args.results:
+                show(research.researcher.list_results(task_id))
+            elif args.limits:
+                show(maintenance.set_limits(
+                    task_id, int(args.limits[1]), int(args.limits[2])
+                ))
+            else:
+                with controller.session(task_id) as selected:
+                    info = selected.inspect(task_id)
+                    if not info["exists"]:
+                        if store.get_task(task_id)["status"] != "planned":
+                            raise TaskStateError("没有可恢复的计划")
+                        events = selected.start(task_id)
+                    elif not info["next"]:
+                        raise TaskStateError("任务已经结束")
                     else:
-                        print("\nAgent:", agent.run(text))
-
-                except TaskControlError as error:
-                    print(f"[Task] {error}")
-                except Exception:
-                    logging.exception(
-                        "本轮运行失败；研究任务请用 /state ID 查看，"
-                        "用 /resume ID 恢复"
-                    )
-
+                        events = () if info["pending"] else selected.resume(task_id)
+                    drive(selected, store, task_id, events)
+        return 0
     except (EOFError, KeyboardInterrupt):
-        print("\n退出程序；已保存的研究 checkpoint 可在下次恢复。")
-    finally:
-        agent.memory.conn.close()
+        print("已停止当前命令；已提交的任务状态保留")
+        return 130
+    except Exception as error:
+        show({"error": type(error).__name__, "message": str(error)})
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

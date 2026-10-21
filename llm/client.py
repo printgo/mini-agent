@@ -29,19 +29,26 @@ TIMEOUT = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
 MAX_RETRIES = read_int("LLM_MAX_RETRIES", 1, 0)
 MAX_OUTPUT_TOKENS = read_int("LLM_MAX_OUTPUT_TOKENS", 4096, 1)
 
-if not API_KEY:
-    raise ValueError("请配置 DEEPSEEK_API_KEY")
-if not BASE_URL or not MODEL or not MEMORY_MODEL:
-    raise ValueError("BASE_URL、MODEL 和 MEMORY_MODEL 不能为空")
-if not math.isfinite(TIMEOUT) or TIMEOUT <= 0:
-    raise ValueError("LLM_TIMEOUT_SECONDS 必须是有限的正数")
+# 只查看状态、取消或管理记忆时，不创建模型客户端或要求模型凭据。
+client = None
 
-client = OpenAI(
-    api_key=API_KEY,
-    base_url=BASE_URL,
-    timeout=TIMEOUT,
-    max_retries=MAX_RETRIES,
-)
+
+def get_client():
+    global client
+    if client is None:
+        if not API_KEY:
+            raise ValueError("请配置 DEEPSEEK_API_KEY")
+        if not BASE_URL or not MODEL or not MEMORY_MODEL:
+            raise ValueError("BASE_URL、MODEL 和 MEMORY_MODEL 不能为空")
+        if not math.isfinite(TIMEOUT) or TIMEOUT <= 0:
+            raise ValueError("LLM_TIMEOUT_SECONDS 必须是有限的正数")
+        client = OpenAI(
+            api_key=API_KEY,
+            base_url=BASE_URL,
+            timeout=TIMEOUT,
+            max_retries=MAX_RETRIES,
+        )
+    return client
 
 
 def log_usage(usage) -> None:
@@ -74,7 +81,7 @@ def complete(
     if tools:
         options["tools"] = tools
 
-    response = client.chat.completions.create(**options)
+    response = get_client().chat.completions.create(**options)
 
     # 异常结束的响应也可能已经消耗 Token，先记录用量。
     log_usage(response.usage)
@@ -100,7 +107,7 @@ def stream_text(messages: list[dict]) -> Iterator[str]:
     # 本版只处理纯文本流，不携带工具定义。
     options = request_options(messages)
 
-    stream = client.chat.completions.create(
+    stream = get_client().chat.completions.create(
         **options,
         stream=True,
         stream_options={"include_usage": True},

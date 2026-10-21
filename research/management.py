@@ -92,7 +92,7 @@ class TaskMaintenance:
     def usage(self, task_id):
         self.store.get_task(task_id)
         version = self.controller.research.checkpoint_version(task_id)
-        if version not in {None, "16.0"}:
+        if version not in {None, "16.0", "19.0"}:
             return {"metered": False, "version": version, "note": "旧版本未计量"}
         return {
             "metered": True,
@@ -103,8 +103,8 @@ class TaskMaintenance:
     def set_limits(self, task_id, model_limit, query_limit):
         with TaskFileLock(self.controller.db_path, task_id):
             info = self.controller.inspect(task_id)
-            if info["version"] not in {None, "16.0"}:
-                raise TaskStateError("只支持设置 V16 任务的调用额度")
+            if info["version"] not in {None, "16.0", "19.0"}:
+                raise TaskStateError("只支持设置 V16/V19 任务的调用额度")
             if not info["resume_allowed"]:
                 raise TaskStateError("只能设置 planned 或可恢复任务的额度")
             return self.ledger.set_limits(task_id, model_limit, query_limit)
