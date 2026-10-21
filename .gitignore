@@ -9,3 +9,7 @@ data/*.db-*
 # Local V19 model weights and vector index
 /data/models/
 /data/qdrant/
+# Web dependencies and build output
+/frontend/node_modules/
+/frontend/dist/
+/frontend/coverage/

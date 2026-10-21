@@ -83,14 +83,32 @@ class TeamWorkflowAgent(LimitedWorkflowAgent):
             raise ValueError("仅本地研究必须提供文件")
         task_id = self.store.create_task(question)
         self.knowledge.bind(self.user_id, task_id)
-        try:
-            with TaskFileLock(self.db_path, task_id):
-                memories = self.knowledge.retrieve(self.user_id, question)
-                with self.store.conn:
-                    self.store.conn.execute(
-                        "INSERT INTO research_task_context VALUES (?,?)",
-                        (task_id, canonical_json(memories)),
-                    )
+        return self.plan_existing(task_id, files=files, local_only=local_only)
+
+    def plan_existing(self, task_id, *, files=(), local_only=False):
+        """为已经创建并绑定档案的任务规划，供 CLI 和后台 worker 共用。"""
+        self.knowledge.assert_owner(self.user_id, task_id)
+        if local_only and not files:
+            raise ValueError("仅本地研究必须提供文件")
+        with TaskFileLock(self.db_path, task_id):
+            task = self.store.get_task(task_id)
+            if task["status"] == "planned":
+                return task
+            if task["status"] != "planning":
+                raise ValueError("只有 planning 任务可以执行规划")
+            question = task["question"]
+            try:
+                frozen = self.store.conn.execute(
+                    "SELECT 1 FROM research_task_context WHERE task_id=?", (task_id,)
+                ).fetchone()
+                if frozen is None:
+                    memories = self.knowledge.retrieve(self.user_id, question)
+                    with self.store.conn:
+                        self.store.conn.execute(
+                            "INSERT INTO research_task_context VALUES (?,?)",
+                            (task_id, canonical_json(memories)),
+                        )
+                memories = self._frozen(task_id)
                 for filename in files:
                     import_file(self.store, task_id, filename)
                 with self._model_scope(task_id):
@@ -101,9 +119,9 @@ class TeamWorkflowAgent(LimitedWorkflowAgent):
                 self.knowledge.apply(
                     self.user_id, "ADD", "topic", task_id, question, task_id=task_id
                 )
-        except Exception as error:
-            logger.exception("V19 规划失败")
-            self.store.update_task(task_id, "failed", errors=[str(error)])
+            except Exception as error:
+                logger.exception("V19 规划失败")
+                self.store.update_task(task_id, "failed", errors=[str(error)])
         return self.store.get_task(task_id)
 
     def _input_hash(self, node, state):

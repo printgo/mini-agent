@@ -41,6 +41,7 @@ def main(argv=None):
     parser.add_argument("--index", default="data/qdrant")
     parser.add_argument("--models", default="data/models")
     parser.add_argument("--context-limit", type=int, default=16000)
+    parser.add_argument("--web-port", type=int, default=8000)
     parser.add_argument("--file", action="append", default=[])
     parser.add_argument("--local-only", action="store_true")
     parser.add_argument("--evidence", nargs="+", default=[])
@@ -56,6 +57,7 @@ def main(argv=None):
     mode.add_argument("--memories", metavar="QUERY")
     mode.add_argument("--confirm", nargs=3, metavar=("ID", "KEY", "TEXT"))
     mode.add_argument("--warmup", action="store_true")
+    mode.add_argument("--web", action="store_true", help="启动本地研究工作台")
     args = parser.parse_args(argv)
     if (args.file or args.local_only) and args.question is None:
         parser.error("--file/--local-only 只能用于 --question")
@@ -63,6 +65,20 @@ def main(argv=None):
         os.environ.setdefault(
             "TIKTOKEN_CACHE_DIR", str(Path(args.models).resolve() / "tiktoken")
         )
+        if args.web:
+            if not 1 <= args.web_port <= 65535:
+                raise ValueError("--web-port 必须为 1～65535")
+            if args.user != "default":
+                raise ValueError("网页第一步使用 default 本地档案")
+            import uvicorn
+            from api.app import create_app
+            from research.web_service import WebSettings
+            settings = WebSettings(
+                db_path=Path(args.db).resolve(), index_path=Path(args.index).resolve(),
+                model_cache=Path(args.models).resolve(), context_limit=args.context_limit,
+            )
+            uvicorn.run(create_app(settings), host="127.0.0.1", port=args.web_port)
+            return 0
         if args.warmup:
             import tiktoken
             from research.vector import HybridIndex

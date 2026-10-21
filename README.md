@@ -4,12 +4,13 @@
 
 项目围绕“规划、审批、采集、检索、写作、审查、交付”组织研究流程，支持多 Agent 协作、本地文档研究、上下文压缩、长期记忆和中断恢复。
 
-统一启动入口为 `main.py`，通过命令行参数执行研究及管理操作。
+统一启动入口为 `main.py`，支持浏览器研究工作台和命令行研究、管理操作。
 
 ## 核心功能
 
 | 功能 | 说明 |
 |---|---|
+| 浏览器工作台 | 创建任务、审阅计划、批准或拒绝检索、恢复执行和阅读报告 |
 | 多 Agent 协作 | Planner 规划任务，Researcher 采集资料，Reviewer 审查报告，通过结构化结果交接 |
 | 并行采集 | 并行处理独立查询，数据库写入和调用额度管理由主线程完成 |
 | 多来源研究 | 支持网页、arXiv 论文摘要、GitHub 公开仓库 README 和本地文档 |
@@ -49,8 +50,16 @@ research-agent/
 ├── requirements.txt         # Python 依赖
 ├── .env.example             # 环境配置模板
 ├── .gitignore
+├── api/                     # FastAPI 接口与应用生命周期
+│   └── app.py               # HTTP 接口与前端静态文件
+├── frontend/                # React、TypeScript、Vite 浏览器界面
+│   ├── package.json         # 前端命令和依赖
+│   ├── package-lock.json    # 可重复安装的依赖锁文件
+│   └── src/                 # 页面、API 客户端和界面测试
 ├── llm/                     # 模型客户端与请求配置
 ├── research/                # 研究工作流、检索、记忆及报告处理
+│   ├── engine.py            # 研究引擎与已有任务规划
+│   ├── web_service.py       # 网页持久任务队列、审批及恢复
 │   ├── team.py              # Agent 角色与并行采集
 │   ├── vector.py            # 文档解析、向量索引、融合及重排
 │   ├── context.py           # Token 预算与上下文压缩
@@ -82,6 +91,8 @@ research-agent/
 
 | 用途 | 技术 |
 |---|---|
+| 浏览器界面 | React、TypeScript、Vite |
+| HTTP 服务 | FastAPI、Uvicorn |
 | 工作流与状态恢复 | LangGraph、SQLite Checkpointer |
 | 研究模型调用 | OpenAI Python SDK、兼容模型接口 |
 | 网页采集 | Tavily、requests、BeautifulSoup |
@@ -190,6 +201,81 @@ if ($LASTEXITCODE -ne 0) { throw '本地检索验证失败' }
 - 上下文预算计算。
 
 临时测试数据在运行结束后清理，不读取现有业务数据库。
+
+## 浏览器研究工作台
+
+工作台使用本地 `default` 研究档案，显示由网页创建的研究任务。命令行创建的历史任务继续通过命令行管理。
+
+### 安装并构建界面
+
+在 Python 依赖安装完成后，安装带 npm 的 Node.js，版本需为 22.12 或更高。
+
+```powershell
+Set-Location 'C:\path\to\research-agent'
+node --version
+npm.cmd --version
+
+Set-Location '.\frontend'
+npm.cmd ci
+if ($LASTEXITCODE -ne 0) { throw '前端依赖安装失败' }
+npm.cmd test
+if ($LASTEXITCODE -ne 0) { throw '前端测试失败' }
+npm.cmd run build
+if ($LASTEXITCODE -ne 0) { throw '前端构建失败' }
+Set-Location '..'
+```
+
+`package-lock.json` 应与 `package.json` 一同保留。构建产物保存在 `frontend/dist`。
+
+### 启动工作台
+
+确认根目录 `.env` 中的模型与搜索配置已填写，按“模型预热与链路验证”完成首次模型下载后，执行：
+
+```powershell
+.\.venv\Scripts\python.exe -B main.py --web
+```
+
+打开 <http://127.0.0.1:8000>。构建后的页面和 API 由同一个 Python 服务提供，不需要另开前端进程。
+
+端口被占用时：
+
+```powershell
+.\.venv\Scripts\python.exe -B main.py --web --web-port 8010
+```
+
+此时打开 <http://127.0.0.1:8010>。HTTP 接口说明位于同一端口的 `/docs`。
+
+操作流程：
+
+1. 输入研究问题并创建任务，后台生成检索计划。
+2. 查看查询来源与内容，选择“批准并继续”或“拒绝本次检索”。
+3. 查看采集、检索、写作和审查阶段，以及已记录的逻辑调用用量。
+4. 需要补查时，再次审批；执行结束后阅读带引用的 Markdown 报告。
+5. 刷新或重新打开页面后，从任务列表继续查看；出现“恢复任务”时，确认状态后手动恢复。
+
+页面每轮请求完成后约 2 秒再次读取状态，展示已保存的执行阶段。关闭浏览器不会关闭后台服务；服务停止期间任务不会执行，重新启动后，先前正在执行的任务会显示中断提示。已排队的操作会继续处理。
+
+模型和搜索凭据只配置在后端 `.env`，前端通过本地 API 操作任务。服务监听 `127.0.0.1`，同一数据库只启动一个 Web 服务进程。
+
+### 前端开发
+
+先在一个终端启动 Python 服务：
+
+```powershell
+Set-Location 'C:\path\to\research-agent'
+.\.venv\Scripts\python.exe -B main.py --web
+```
+
+再在另一个终端启动 Vite：
+
+```powershell
+Set-Location 'C:\path\to\research-agent\frontend'
+npm.cmd run dev
+```
+
+打开 <http://127.0.0.1:5173>。开发服务器把 `/api` 请求代理到 `127.0.0.1:8000`；开发时保留后端默认端口。
+
+修改前端后，重新执行 `npm.cmd run build`，再启动 Python 服务即可使用新构建的界面。
 
 ## 创建研究任务
 
@@ -555,6 +641,10 @@ if ($LASTEXITCODE -ne 0) { throw '测试失败' }
 | 文档解析 | TXT、Markdown、文本 PDF 和 DOCX |
 | 报告处理 | 规则验收、快照、哈希和并发发布 |
 | 命令行 | 无模型凭据和词表时的运维操作 |
+| Web API | 创建幂等、审批 checkpoint 校验、持久队列、重启恢复及工作线程互斥 |
+| 浏览器界面 | 提交重试、轮询更新、审批冲突、任务切换及 Markdown 展示 |
+
+前端测试在 `frontend` 目录执行 `npm.cmd test`；构建检查执行 `npm.cmd run build`。
 
 日常自动化测试中的模型与采集接口使用测试夹具；本地依赖集成测试使用真实 Qdrant 和文档解析器。
 
@@ -570,7 +660,7 @@ if ($LASTEXITCODE -ne 0) { throw '测试失败' }
 
 ```text
 data/
-├── memory.db                 # 业务数据及研究记忆
+├── memory.db                 # 业务数据、研究记忆及 web_jobs 持久队列
 ├── research_checkpoints.db   # 工作流恢复状态
 ├── models/                   # 模型及词表缓存
 └── qdrant/                   # 向量索引
@@ -583,3 +673,4 @@ data/
 文档文本快照存储在业务数据库中；模型可重新下载，向量索引可根据文档快照重建。
 
 `.env`、虚拟环境、运行数据库、默认模型缓存、默认向量索引及默认导出目录由 `.gitignore` 管理。使用自定义存储目录时，应同步配置相应的忽略规则。
+前端依赖 `frontend/node_modules`、构建产物 `frontend/dist` 和覆盖率目录由 `.gitignore` 管理。
